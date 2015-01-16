@@ -1,0 +1,202 @@
+------------------
+SOFTWARE ADICIONAL
+------------------
+
+sudo rpi-update
+sudo apt-get update
+sudo apt-get install libopencv-dev python-opencv
+
+
+sudo apt-get install python-imaging
+sudo apt-get install python-imaging-tk
+
+sudo apt-get install ipython python-scipy python-numpy python-setuptools python-pip
+sudo pip install http://github.com/sightmachine/SimpleCV/zipball/master
+sudo pip install svgwrite
+sudo pip install paramiko
+
+sudo apt-get install scrot
+
+------------
+SSH LEGO EV3
+------------
+
+sudo nano /etc/network/interfaces
+
+++ iface usb0 inet static
+++ address 10.42.0.1
+++ netmask 255.255.255.0
+
+sudo sysctl -w net.ipv4.ip_forward=1
+echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
+ping 10.42.0.3 (test)
+ssh root@10.42.0.3 (default psw / r00tme)
+
+------------------
+INICIO DEL SISTEMA
+------------------
+
+cd /home/pi
+nano image_processing.sh
+
+++ #!/bin/sh
+++ 
+++ cd /run/shm
+++ sudo rm -rf *
+++ cd /home/pi
+++ python script.py
+
+nano image_capture.sh
+
+++ #!/bin/sh
+++ 
+++ # build initial camera command, add -cfx 128:128 for gray scale
+++ # shutdown timer, timelapse, burst mode, nopreview, dimensions, no thumbnail
+++ raspistill -t 0 -tl 0 -bm -n -o /run/shm/image.jpg -w 320 -h 240 -th 0:0:0
+
+nano video_streaming.sh
+
+++ #!/bin/sh
+++ 
+++ # start video streaming
+++ LD_LIBRARY_PATH=/usr/local/lib /usr/local/bin/mjpg_streamer -i "input_file.so -f /run/shm -n image.jpg" -o "output_http.so -w /usr/local/www"
+
+nano dhcp_service.sh
+
+++ #!/bin/sh
+++ 
+++ # keep attempting until service has started
+++ string="failed"
+++ while true
+++ do
+++     if sudo service isc-dhcp-server start | grep -q "$string"; then
+++         echo "could not start service."
+++         sleep 5
+++     else
+++        echo "service started."
+++        break
+++     fi
+++ done
+
+chmod 755 image_processing.sh
+chmod 755 image_capture.sh
+chmod 755 video_streaming.sh
+chmod 755 dhcp_service.sh
+cd /home/bin
+mkdir logs
+sudo crontab -e
+
+++ @reboot sh /home/pi/image_processing.sh >/home/pi/logs/cronlog_processing 2>&1
+++ @reboot sh /home/pi/image_capture.sh >/home/pi/logs/cronlog_image 2>&1
+++ @reboot sh /home/pi/video_streaming.sh >/home/pi/logs/cronlog_stream 2>&1
+++ @reboot sh /home/pi/dhcp_service.sh >/home/pi/logs/cronlog_dhcp 2>&1
+
+
+sudo reboot (test)
+
+------------------
+CONFIGURACION WIFI
+------------------
+
+wget https://dl.dropboxusercontent.com/u/80256631/8188eu-20141107.tar.gz
+tar -zxvf 8188eu-20141107.tar.gz
+rm 8188eu-20141107.tar.gz
+sudo install -p -m 644 8188eu.ko /lib/modules/$(uname -r)/kernel/drivers/net/wireless
+sudo insmod /lib/modules/$(uname -r)/kernel/drivers/net/wireless/8188eu.ko
+sudo depmod -a
+rm 8188eu.ko
+sudo nano /etc/network/interfaces
+
+++ allow-hotplug wlan0
+++ iface wlan0 inet static
+++ address 192.168.42.1
+++ netmask 255.255.255.0
+++ gateway 192.168.1.1
+++ 
+-- wpa-roam /etc/wpa_supplicant/wpa_supplicant.conf
+-- iface default inet dhcp
+
+sudo service networking reload
+
+--------------------------
+CONFIGURACION ACCESS POINT
+--------------------------
+
+sudo apt-get install isc-dhcp-server
+sudo nano /etc/dhcp/dhcpd.conf
+
+-- option domain-name "example.org";
+-- option domain-name-servers ns1.example.org, ns2.example.org;
+++ authoritative;
+++ subnet 192.168.42.0 netmask 255.255.255.0 { 
+++    range 192.168.42.10 192.168.42.50;
+++    option broadcast-address 192.168.42.255;
+++    option routers 192.168.42.1;
+++    default-lease-time 600;
+++    max-lease-time 7200;
+++    option domain-name "local";
+++    option domain-name-servers 8.8.8.8, 8.8.4.4;
+++ }
+
+sudo nano /etc/default/isc-dhcp-server
+
+++ INTERFACES="wlan0"
+
+sudo service isc-dhcp-server restart
+sudo apt-get install hostapd
+wget http://www.daveconroy.com/wp3/wp-content/uploads/2013/07/hostapd.zip
+unzip hostapd.zip
+sudo mv /usr/sbin/hostapd /usr/sbin/hostapd.bak
+sudo mv hostapd /usr/sbin/hostapd
+sudo chmod 755 /usr/sbin/hostapd
+rm hostapd.zip
+sudo nano /etc/hostapd/hostapd.conf
+
+++ interface=wlan0
+++ driver=rtl871xdrv
+++ ssid=RaspberryPi
+++ hw_mode=g
+++ channel=6
+++ macaddr_acl=0
+++ auth_algs=1
+++ ignore_broadcast_ssid=0
+++ wpa=2
+++ wpa_passphrase=raspberry
+++ wpa_key_mgmt=WPA-PSK
+++ wpa_pairwise=TKIP
+++ rsn_pairwise=CCMP
+
+sudo nano /etc/default/hostapd
+
+++ DAEMON_CONF="/etc/hostapd/hostapd.conf"
+
+sudo nano /etc/sysctl.conf
+
+++ net.ipv4.ip_forward=1
+
+sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+sudo iptables -A FORWARD -i eth0 -o wlan0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+sudo iptables -A FORWARD -i wlan0 -o eth0 -j ACCEPT
+sudo sh -c "iptables-save > /etc/iptables.ipv4.nat"
+sudo nano /etc/network/interfaces
+
+++ pre-up iptables-restore < /etc/iptables.ipv4.nat
+
+sudo update-rc.d hostapd enable
+
+--------------
+STREAMING MJPG
+--------------
+
+sudo apt-get install imagemagick
+sudo ln -s /usr/include/linux/videodev2.h /usr/include/linux/videodev.h
+wget http://sourceforge.net/code-snapshots/svn/m/mj/mjpg-streamer/code/mjpg-streamer-code-182.zip
+unzip mjpg-streamer-code-182.zip
+cd mjpg-streamer-code-182/mjpg-streamer
+make mjpg_streamer input_file.so output_http.so
+sudo cp mjpg_streamer /usr/local/bin/
+sudo cp output_http.so input_file.so /usr/local/lib/
+sudo cp -R www /usr/local/www
+cd ./../.
+rm mjpg-streamer-code-182.zip
+rm -rf mjpg-streamer-code-182
