@@ -11,6 +11,10 @@ from operator import attrgetter
 from SimpleCV import *
 from threading import Thread
 
+##
+# main settings and variables
+##
+
 # define output status
 STATUS_CONNECTED = "connected"
 
@@ -21,6 +25,10 @@ port = 3033
 MAX_SIZE = 3600
 MIN_SIZE = 20
 
+# camera control
+CAMERA_ANGLE = 80;
+POSITION_TOLERANCE = 5;
+
 # secure shell configuration and commands
 # configure usb0 ip and net mask
 ssh = paramiko.SSHClient()
@@ -28,23 +36,48 @@ ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 print "Starting SSH connection with EV3."
 ssh.connect('10.42.0.3', username='root', password='r00tme', timeout=10)
 
+##
 # ssh command utils
+##
+
+# side motors
 def get_duty_command(speed, motor):
     return "echo " + speed + " > /sys/class/tacho-motor/tacho-motor" + motor + "/duty_cycle_sp"
 
 def get_status_command(status, motor):
     return "echo " + status + " > /sys/class/tacho-motor/tacho-motor" + motor + "/run"
-    
+
 def get_led_command_left(red, green):
     return "echo " + red + " > /sys/class/leds/ev3\:red\:left/brightness; echo " + green + " > /sys/class/leds/ev3\:green\:left/brightness"
 
 def get_led_command_right(red, green):
     return "echo " + red + " > /sys/class/leds/ev3\:red\:right/brightness; echo " + green + " > /sys/class/leds/ev3\:green\:right/brightness"
-    
+
 def run_forward():
     ssh.exec_command(get_duty_command("-70", "1") + ";" + get_duty_command("-70", "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2") + ";sleep 0.1;" + get_duty_command("0", "0") + ";" + get_duty_command("0", "1") + ";" + get_duty_command("0", "2")  + ";" + get_status_command("0", "0") + ";" + get_status_command("0", "1") + ";" + get_status_command("0", "2"))
-    
+
+# camera utils
+def get_camera_position():
+    stdin, stdout, sterr = ssh.exec_command("cat /sys/class/tacho-motor/tacho-motor0/position")
+    return int(stdout.read().strip())
+
+def reset_camera_position():
+    if (abs(get_camera_position() * - 1)) >= POSITION_TOLERANCE:
+        camera_rotation = str(get_camera_position() * - 1)
+        print "Correcting camera rotation: " + camera_rotation + " degrees"
+        ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position; echo " + camera_rotation + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
+        time.sleep(2)
+        ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position")
+        
+def move_camera(step):
+    value = get_camera_position() + step
+    if value <= CAMERA_ANGLE and value >= -CAMERA_ANGLE:
+        ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position; echo " + str(value) + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
+        sleep(2)
+
+##
 # image processing utils
+##
 
 def sr_matrix(blob):
    x1 = blob.topLeftCorner()[0]
@@ -148,6 +181,10 @@ print "Starting image processing thread."
 t1 = ProcessingThread()
 t1.start()
 
+##
+# socket management
+##
+
 # process socket input
 def process_socket_input(value):
     if value.startswith('M'):
@@ -169,9 +206,9 @@ def process_socket_input(value):
                 elif value == "ML":
                     ssh.exec_command(get_duty_command("70", "1") + ";" + get_duty_command("-70", "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
                 elif value == "MCR":
-                    ssh.exec_command(get_duty_command("30", "0") + ";" + get_status_command("1", "0"))
+                    move_camera(20)
                 elif value == "MCL":
-                    ssh.exec_command(get_duty_command("-30", "0") + ";" + get_status_command("1", "0"))
+                    move_camera(-20)
             else:
                 print "Manual mode needs to be enabled to perform this action: " + value
     elif value == "A":
@@ -221,9 +258,16 @@ print "Starting socket thread."
 t2 = SocketThread()
 t2.start()
 
+##
+# cleanup after exit
+##
+
 def cleanup():
     # both leds red
     ssh.exec_command(get_led_command_left("255", "0") + ";" + get_led_command_right("255", "0"))
+
+    # reset camera position
+    reset_camera_position()
 
     # stop image processing thread
     print "Stopping image processing thread."
@@ -235,9 +279,19 @@ def cleanup():
     t2.stop()
     t2.join()
 
+##
+# initialization
+##
+
 def main():
     # both leds green
     ssh.exec_command(get_led_command_left("0", "255") + ";" + get_led_command_right("0", "255"))
+
+    # define camera run mode
+    ssh.exec_command("echo position > /sys/class/tacho-motor/tacho-motor0/run_mode; echo brake > /sys/class/tacho-motor/tacho-motor0/stop_mode; echo on > /sys/class/tacho-motor/tacho-motor0/regulation_mode; echo 300 > /sys/class/tacho-motor/tacho-motor0/ramp_up_sp; echo 300 > /sys/class/tacho-motor/tacho-motor0/ramp_down_sp; echo 500 > /sys/class/tacho-motor/tacho-motor0/pulses_per_second_sp")
+
+    # reset camera position
+    reset_camera_position()
 
     host = ''
     s_receive = socket.socket()
