@@ -26,8 +26,14 @@ MAX_SIZE = 3600
 MIN_SIZE = 20
 
 # camera control
-CAMERA_ANGLE = 80;
+CAMERA_ANGLE = 90;
 POSITION_TOLERANCE = 5;
+
+# speeds
+r = 1.5 # cm
+L = 18 # cm
+Wright = 0 # rad/s
+Wleft = 0 # rad/s
 
 # secure shell configuration and commands
 # configure usb0 ip and net mask
@@ -66,14 +72,14 @@ def reset_camera_position():
         camera_rotation = str(get_camera_position() * - 1)
         print "Correcting camera rotation: " + camera_rotation + " degrees"
         ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position; echo " + camera_rotation + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
-        time.sleep(2)
+        time.sleep(0.5)
         ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position")
         
 def move_camera(step):
     value = get_camera_position() + step
     if value <= CAMERA_ANGLE and value >= -CAMERA_ANGLE:
-        ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position; echo " + str(value) + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
-        sleep(2)
+        ssh.exec_command("echo " + str(value) + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
+        time.sleep(0.5)
 
 ##
 # image processing utils
@@ -94,6 +100,7 @@ def sr_matrix(blob):
    l2 = array([z1_inv, 0, x2/z1, x2*y2, -(1+pow(x2, 2)), y2, 0, z1_inv, y2/z1, 1+pow(y2, 2), -x2+y2, -x2]).reshape(2, 6)
    l3 = array([z1_inv, 0, x3/z1, x3*y3, -(1+pow(x3, 2)), y3, 0, z1_inv, y3/z1, 1+pow(y3, 2), -x3+y3, -x3]).reshape(2, 6)
    l4 = array([z1_inv, 0, x4/z1, x4*y4, -(1+pow(x4, 2)), y4, 0, z1_inv, y4/z1, 1+pow(y4, 2), -x4+y4, -x4]).reshape(2, 6)
+   
    return array([l1, l2, l3, l4]).reshape(8, 6)
 
 # find matching blob on the image
