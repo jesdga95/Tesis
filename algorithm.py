@@ -6,13 +6,18 @@ import paramiko
 # control constants
 ORIGIN_THETA = 59.15
 
-# control variables
-Wr = 1 # rad/s
-Wl = 3 # rad/s
-Wpl = 0.05 # rad/s
+# measurements
+xc = 0 # cm
+xp = 5 # cm
+yc = 2 # cm
+yp = 5 # cm
 r = 1.5 # cm
-L = 18 # cm
+l = 18 # cm
+
+# control variables
+w_pl = 4.19 # rad/s
 theta = 0 # degrees
+wa = None # v, w, w_pl
 
 # secure shell configuration and commands
 # configure usb0 ip and net mask
@@ -32,7 +37,6 @@ def get_motor_speed(motor):
     direction = 1
     if int(speed_percent) < 0:
         speed_percent = str(-int(speed_percent))
-        direction = -1
     speed = {'0': 0,
         '10': 1.88,
         '20': 3.67,
@@ -44,29 +48,43 @@ def get_motor_speed(motor):
         '80': 14.34,
         '90': 15.18,
         '100': 15.28}.get(speed_percent, 0)
-    return speed * direction
+    return speed
 
 # speed relation
-def getSr():
-    global Wr, Wl
-    Dr = array([r/2, r/2, r/L, -r/L]).reshape(2, 2)
-    Ws = array([Wr, Wl]).reshape(2, 1)
-    Sr = numpy.dot(Dr, Ws) # returns v, w
-    return Rv
+def get_sr():
+    wr = get_motor_speed(2) # rad/s
+    wl = get_motor_speed(1) # rad/s
+    dr = array([r/2, r/2, r/l, -r/l]).reshape(2, 2)
+    ws = array([wr, wl]).reshape(2, 1)
+    sr = numpy.dot(dr, ws) # returns v, w
+    return sr
 
 # monocycle model
-def getMm():
+def get_mm():
+    sr = get_sr()
+    v = sr[0]
+    w = sr[1]
     theta = ORIGIN_THETA + get_camera_position()
-    Rdt = array([r/2*math.cos(theta), r/2*math.cos(theta), 0, r/2*math.sin(theta), r/2*math.sin(theta), 0, r/L, -r/L, 0, 0, 0, 1]).reshape(4, 3)
-    Wa = array([Wr, Wl, Wpl]).reshape(3, 1)
-    Pa = numpy.dot(Rdt, Wa) # returns xom, yom, theta, Thetapl
-    return Pa
+    r_dt = array([math.cos(theta), 0, 0, math.sin(theta), 0, 0, 0, 1, 0, 0, 0, 1]).reshape(4, 3)
+    global wa
+    wa = array([v, w, w_pl]).reshape(3, 1)
+    pa = numpy.dot(r_dt, wa) # returns xom, yom, theta, theta_pl
+    return pa
+
+# kinematic screw
+def get_ks():
+    mm = get_mm()
+    tetha_pl = mm[3]
+    xy_p = array([0, 0, 0, -math.sin(tetha_pl), xc+xp*math.cos(tetha_pl), xc, math.cos(tetha_pl), -yc+yp*math.sin(tetha_pl), -yc, 0, -1, -1, 0, 0, 0, 0, 0, 0]).reshape(6, 3)
+    global wa
+    ks = numpy.dot(xy_p, wa) # returns v_xc, v_yc, v_zc, o_xc, o_yc, o_zc
+    return ks
     
 
 def test():
 #    print get_motor_speed(1)
-    print getMm()
+    print get_ks()
     time.sleep(1)
 
-while True:
-    test()
+#while True:
+test()

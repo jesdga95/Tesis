@@ -1,12 +1,13 @@
-import os, subprocess, glob, time, atexit
+import os, subprocess, glob, time, math, atexit
 import cv2.cv as cv
 import select as sel
 import paramiko
 import socket
+import numpy
 import Queue
 import sys
 
-from numpy import *
+from numpy import array, linalg
 from operator import attrgetter
 from SimpleCV import *
 from threading import Thread
@@ -29,11 +30,21 @@ MIN_SIZE = 20
 CAMERA_ANGLE = 90;
 POSITION_TOLERANCE = 5;
 
-# speeds
+# control constants
+ORIGIN_THETA = 59.15
+
+# measurements
+xc = 0 # cm
+xp = 5 # cm
+yc = 2 # cm
+yp = 5 # cm
 r = 1.5 # cm
-L = 18 # cm
-Wright = 0 # rad/s
-Wleft = 0 # rad/s
+l = 18 # cm
+
+# control variables
+w_pl = 4.19 # rad/s
+theta = 0 # degrees
+wa = None # v, w, w_pl
 
 # secure shell configuration and commands
 # configure usb0 ip and net mask
@@ -66,7 +77,7 @@ def run_forward():
 def get_camera_position():
     stdin, stdout, sterr = ssh.exec_command("cat /sys/class/tacho-motor/tacho-motor0/position")
     return int(stdout.read().strip())
-
+    
 def reset_camera_position():
     if (abs(get_camera_position() * - 1)) >= POSITION_TOLERANCE:
         camera_rotation = str(get_camera_position() * - 1)
@@ -81,11 +92,42 @@ def move_camera(step):
         ssh.exec_command("echo " + str(value) + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
         time.sleep(0.5)
 
+def get_motor_speed(motor):  # in rad/s
+    stdin, stdout, sterr = ssh.exec_command("cat /sys/class/tacho-motor/tacho-motor" + str(motor) + "/duty_cycle_sp")
+    speed_percent = stdout.read().strip()
+    direction = 1
+    if int(speed_percent) < 0:
+        speed_percent = str(-int(speed_percent))
+    speed = {'0': 0,
+        '10': 1.88,
+        '20': 3.67,
+        '30': 5.34,
+        '40': 7.12,
+        '50': 8.9,
+        '60': 10.9,
+        '70': 12.35,
+        '80': 14.34,
+        '90': 15.18,
+        '100': 15.28}.get(speed_percent, 0)
+    return speed
+
 ##
 # image processing utils
 ##
 
-def sr_matrix(blob):
+def get_sr(blob):
+   x1 = blob.topLeftCorner()[0]
+   y1 = blob.topLeftCorner()[1]
+   x2 = blob.topRightCorner()[0]
+   y2 = blob.topRightCorner()[1]
+   x3 = blob.bottomLeftCorner()[0]
+   y3 = blob.bottomLeftCorner()[1]
+   x4 = blob.bottomRightCorner()[0]
+   y4 = blob.bottomRightCorner()[1]
+   
+   return array([x1, y1, x2, y2, x3, y3, x4, y4]).reshape(8, 1)
+
+def get_ls(blob):
    x1 = blob.topLeftCorner()[0]
    y1 = blob.topLeftCorner()[1]
    x2 = blob.topRightCorner()[0]
@@ -102,6 +144,36 @@ def sr_matrix(blob):
    l4 = array([z1_inv, 0, x4/z1, x4*y4, -(1+pow(x4, 2)), y4, 0, z1_inv, y4/z1, 1+pow(y4, 2), -x4+y4, -x4]).reshape(2, 6)
    
    return array([l1, l2, l3, l4]).reshape(8, 6)
+   
+# speed relation
+def get_vr():
+    wr = get_motor_speed(2) # rad/s
+    wl = get_motor_speed(1) # rad/s
+    dr = array([r/2, r/2, r/l, -r/l]).reshape(2, 2)
+    ws = array([wr, wl]).reshape(2, 1)
+    vr = numpy.dot(dr, ws) # returns v, w
+    return vr
+
+# monocycle model
+def get_mm():
+    vr = get_vr()
+    v = vr[0]
+    w = vr[1]
+    theta = ORIGIN_THETA + get_camera_position()
+    r_dt = array([math.cos(theta), 0, 0, math.sin(theta), 0, 0, 0, 1, 0, 0, 0, 1]).reshape(4, 3)
+    global wa
+    wa = array([v, w, w_pl]).reshape(3, 1)
+    pa = numpy.dot(r_dt, wa) # returns xom, yom, theta, theta_pl
+    return pa
+
+# kinematic screw
+def get_ks():
+    mm = get_mm()
+    tetha_pl = mm[3]
+    xy_p = array([0, 0, 0, -math.sin(tetha_pl), xc+xp*math.cos(tetha_pl), xc, math.cos(tetha_pl), -yc+yp*math.sin(tetha_pl), -yc, 0, -1, -1, 0, 0, 0, 0, 0, 0]).reshape(6, 3)
+    global wa
+    ks = numpy.dot(xy_p, wa) # returns v_xc, v_yc, v_zc, o_xc, o_yc, o_zc
+    return ks
 
 # find matching blob on the image
 def find_matching_blob(image):
@@ -115,14 +187,14 @@ def find_matching_blob(image):
             if area <= MAX_SIZE and area >= MIN_SIZE:
                 matching_blob = square
                 # draw red circles on the corners
-                #redcircle = DrawingLayer((red_distance.width, red_distance.height))
-                #redcircle.circle(square.bottomLeftCorner(), 5, color = Color.RED)
-                #redcircle.circle(square.bottomRightCorner(), 5, color = Color.RED)
-                #redcircle.circle(square.topLeftCorner(), 5, color = Color.RED)
-                #redcircle.circle(square.topRightCorner(), 5, color = Color.RED)
-                #red_distance.addDrawingLayer(redcircle)
-                #red_distance.applyLayers()
-                #red_distance.show()
+                redcircle = DrawingLayer((red_distance.width, red_distance.height))
+                redcircle.circle(square.bottomLeftCorner(), 5, color = Color.RED)
+                redcircle.circle(square.bottomRightCorner(), 5, color = Color.RED)
+                redcircle.circle(square.topLeftCorner(), 5, color = Color.RED)
+                redcircle.circle(square.topRightCorner(), 5, color = Color.RED)
+                red_distance.addDrawingLayer(redcircle)
+                red_distance.applyLayers()
+                red_distance.show()
                 break
     return matching_blob
 
@@ -137,14 +209,20 @@ def process_image(file):
         reference = Image('/home/pi/reference.jpg')
         
         blob1 = find_matching_blob(current)
-        blob2 = find_matching_blob(reference)     
+        blob2 = find_matching_blob(reference)
     
-        # measure X distance between reference image and current camera image corners
+        # run algorithm
         if blob1 is not None and blob2 is not None:
-              #print sr_matrix(blob1)
-              print sr_matrix(blob2)
-              if abs(blob2.bottomLeftCorner()[0] - blob1.bottomLeftCorner()[0]) >= 5 and abs(blob2.bottomRightCorner()[0] - blob1.bottomRightCorner()[0]) >= 5 and abs(blob2.topRightCorner()[0] - blob1.topRightCorner()[0]) >= 5 and abs(blob2.topLeftCorner()[0] - blob1.topLeftCorner()[0]) >= 5:
-                  run_forward()
+            ls_sas = get_ls(blob2) + get_ls(blob1)
+            lpl = 0.5 * linalg.pinv(ls_sas)
+            ks = get_ks()
+            # jpl = linalg.pinv(ks)
+            e = numpy.dot(lpl, get_sr(blob2) - get_sr(blob1))
+            e_point = -2 * e
+            q_point = numpy.dot(linalg.pinv(numpy.dot(numpy.dot(lpl, ls_sas), ks)), e_point)
+            print q_point
+            #if abs(blob2.bottomLeftCorner()[0] - blob1.bottomLeftCorner()[0]) >= 5 and abs(blob2.bottomRightCorner()[0] - blob1.bottomRightCorner()[0]) >= 5 and abs(blob2.topRightCorner()[0] - blob1.topRightCorner()[0]) >= 5 and abs(blob2.topLeftCorner()[0] - blob1.topLeftCorner()[0]) >= 5:
+                #run_forward()
     #except:
         #pass
 

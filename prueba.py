@@ -10,18 +10,27 @@ ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 print "Starting SSH connection with EV3."
 ssh.connect('10.42.0.3', username='root', password='r00tme', timeout=10)
 
+
+ssh.exec_command("echo position > /sys/class/tacho-motor/tacho-motor0/run_mode; echo brake > /sys/class/tacho-motor/tacho-motor0/stop_mode; echo on > /sys/class/tacho-motor/tacho-motor0/regulation_mode; echo 300 > /sys/class/tacho-motor/tacho-motor0/ramp_up_sp; echo 300 > /sys/class/tacho-motor/tacho-motor0/ramp_down_sp; echo 500 > /sys/class/tacho-motor/tacho-motor0/pulses_per_second_sp")
+    
 def get_camera_position():
     stdin, stdout, sterr = ssh.exec_command("cat /sys/class/tacho-motor/tacho-motor0/position")
-    pos = stdout.read().strip()
-    print pos
-    return int(pos)
-    
-ssh.exec_command("echo 300 > /sys/class/tacho-motor/tacho-motor0/pulses_per_second_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
+    return int(stdout.read().strip())
 
-while True:
-    if get_camera_position() >= 70:
-        ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/run")
-        break
+def reset_camera_position():
+    camera_rotation = str(get_camera_position() * - 1)
+    print "Correcting camera rotation: " + camera_rotation + " degrees"
+    ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position; echo " + camera_rotation + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
+    time.sleep(0.5)
+    ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position")
+        
+def move_camera(step):
+    value = get_camera_position() + step
+    ssh.exec_command("echo " + str(value) + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
+    time.sleep(2)
+
+reset_camera_position()     
+
 
 #l1 = array([1, 1, 2, 2, 3, 3, 4, 4, 6, 8, 0, 3]).reshape(2, 6)
 #l2 = array([3, 8, 9, 4, 7, 1, 3, 0, 8, 5, 5, 1]).reshape(2, 6)
