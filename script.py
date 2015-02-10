@@ -45,6 +45,8 @@ l = 18 # cm
 w_pl = 4.19 # rad/s
 theta = 0 # degrees
 wa = None # v, w, w_pl
+j = None # robot jacobian
+q_point = None # output
 
 # secure shell configuration and commands
 # configure usb0 ip and net mask
@@ -92,7 +94,7 @@ def move_camera(step):
         ssh.exec_command("echo " + str(value) + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
         time.sleep(0.5)
 
-def get_motor_speed(motor):  # in rad/s
+def get_motor_speed(motor): # in rad/s
     stdin, stdout, sterr = ssh.exec_command("cat /sys/class/tacho-motor/tacho-motor" + str(motor) + "/duty_cycle_sp")
     speed_percent = stdout.read().strip()
     direction = 1
@@ -110,6 +112,12 @@ def get_motor_speed(motor):  # in rad/s
         '90': 15.18,
         '100': 15.28}.get(speed_percent, 0)
     return speed
+    
+def transform_speed(speed): # to percent
+    percent = speed * 100 / 15.28 # we asume linear behavior for the motor
+    if percent > 100:
+        percent = 100
+    return round(percent)
 
 ##
 # image processing utils
@@ -156,9 +164,13 @@ def get_vr():
 
 # monocycle model
 def get_mm():
-    vr = get_vr()
-    v = vr[0]
-    w = vr[1]
+    if q_point is None:
+        vr = get_vr()
+        v = vr[0]
+        w = vr[1]
+    else:
+        v = q_point[0]
+        w = q_point[1]
     theta = ORIGIN_THETA + get_camera_position()
     r_dt = array([math.cos(theta), 0, 0, math.sin(theta), 0, 0, 0, 1, 0, 0, 0, 1]).reshape(4, 3)
     global wa
@@ -170,9 +182,9 @@ def get_mm():
 def get_ks():
     mm = get_mm()
     tetha_pl = mm[3]
-    xy_p = array([0, 0, 0, -math.sin(tetha_pl), xc+xp*math.cos(tetha_pl), xc, math.cos(tetha_pl), -yc+yp*math.sin(tetha_pl), -yc, 0, -1, -1, 0, 0, 0, 0, 0, 0]).reshape(6, 3)
-    global wa
-    ks = numpy.dot(xy_p, wa) # returns v_xc, v_yc, v_zc, o_xc, o_yc, o_zc
+    global j
+    j = array([0, 0, 0, -math.sin(tetha_pl), xc+xp*math.cos(tetha_pl), xc, math.cos(tetha_pl), -yc+yp*math.sin(tetha_pl), -yc, 0, -1, -1, 0, 0, 0, 0, 0, 0]).reshape(6, 3)
+    ks = numpy.dot(j, wa) # returns v_xc, v_yc, v_zc, o_xc, o_yc, o_zc
     return ks
 
 # find matching blob on the image
@@ -216,11 +228,16 @@ def process_image(file):
             ls_sas = get_ls(blob2) + get_ls(blob1)
             lpl = 0.5 * linalg.pinv(ls_sas)
             ks = get_ks()
-            # jpl = linalg.pinv(ks)
             e = numpy.dot(lpl, get_sr(blob2) - get_sr(blob1))
             e_point = -2 * e
-            q_point = numpy.dot(linalg.pinv(numpy.dot(numpy.dot(lpl, ls_sas), ks)), e_point)
-            print q_point
+            global q_point
+            q_point = numpy.dot(linalg.pinv(numpy.dot(numpy.dot(lpl, ls_sas), j)), e_point)
+            w_motors = numpy.dot(linalg.pinv(array([r/2, r/2, r/l, -r/l]).reshape(2, 2)), array([q_point[0], q_point[1]]).reshape(2, 1))
+            print w_motors[0]
+            print w_motors[1]
+            print transform_speed(w_motors[0])
+            print transform_speed(w_motors[1])
+            ssh.exec_command(get_duty_command(str(transform_speed(w_motors[0])), "1") + ";" + get_duty_command(str(transform_speed(w_motors[1])), "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
             #if abs(blob2.bottomLeftCorner()[0] - blob1.bottomLeftCorner()[0]) >= 5 and abs(blob2.bottomRightCorner()[0] - blob1.bottomRightCorner()[0]) >= 5 and abs(blob2.topRightCorner()[0] - blob1.topRightCorner()[0]) >= 5 and abs(blob2.topLeftCorner()[0] - blob1.topLeftCorner()[0]) >= 5:
                 #run_forward()
     #except:
@@ -348,6 +365,9 @@ t2.start()
 ##
 
 def cleanup():
+    # turn motors off
+    ssh.exec_command(get_duty_command("0", "0") + ";" + get_duty_command("0", "1") + ";" + get_duty_command("0", "2")  + ";" + get_status_command("0", "0") + ";" + get_status_command("0", "1") + ";" + get_status_command("0", "2"))
+
     # both leds red
     ssh.exec_command(get_led_command_left("255", "0") + ";" + get_led_command_right("255", "0"))
 
