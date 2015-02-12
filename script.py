@@ -16,11 +16,11 @@ from threading import Thread
 # main settings and variables
 ##
 
-# define output status
-STATUS_CONNECTED = "connected"
-
 # define comm port for input-output sockets
 port = 3033
+
+# client ip
+client_ip = None
 
 # blob sizes
 MAX_SIZE = 3600
@@ -71,9 +71,6 @@ def get_led_command_left(red, green):
 
 def get_led_command_right(red, green):
     return "echo " + red + " > /sys/class/leds/ev3\:red\:right/brightness; echo " + green + " > /sys/class/leds/ev3\:green\:right/brightness"
-
-def run_forward():
-    ssh.exec_command(get_duty_command("-70", "1") + ";" + get_duty_command("-70", "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2") + ";sleep 0.1;" + get_duty_command("0", "0") + ";" + get_duty_command("0", "1") + ";" + get_duty_command("0", "2")  + ";" + get_status_command("0", "0") + ";" + get_status_command("0", "1") + ";" + get_status_command("0", "2"))
 
 # camera utils
 def get_camera_position():
@@ -237,7 +234,14 @@ def process_image(file):
             print w_motors[1]
             print transform_speed(w_motors[0])
             print transform_speed(w_motors[1])
-            ssh.exec_command(get_duty_command(str(transform_speed(w_motors[0])), "1") + ";" + get_duty_command(str(transform_speed(w_motors[1])), "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
+            if client_ip is not None:
+                try:
+                    s_send = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s_send.connect((client_ip, port))
+                    s_send.send(str(w_motors[0])+";"+str(w_motors[1])+";"+str(w_pl))
+                except socket.error:
+                    pass
+            #ssh.exec_command(get_duty_command(str(transform_speed(w_motors[0])), "1") + ";" + get_duty_command(str(transform_speed(w_motors[1])), "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
             #if abs(blob2.bottomLeftCorner()[0] - blob1.bottomLeftCorner()[0]) >= 5 and abs(blob2.bottomRightCorner()[0] - blob1.bottomRightCorner()[0]) >= 5 and abs(blob2.topRightCorner()[0] - blob1.topRightCorner()[0]) >= 5 and abs(blob2.topLeftCorner()[0] - blob1.topLeftCorner()[0]) >= 5:
                 #run_forward()
     #except:
@@ -319,14 +323,10 @@ def process_socket_input(value):
         t1.set_manual(False)
         print "Automatic mode enabled."
     else:
-        # setup connection on the received local IP
-        try:
-            s_send = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s_send.connect((value, port))
-            print "Connected to client: " + value + "."
-            s_send.send(STATUS_CONNECTED)
-        except socket.error:
-            pass
+        # the received information is an IP, store it as the client ip
+        print "Connected to client: " + value + "."
+        global client_ip
+        client_ip = value
 
 
 class SocketThread(Thread):
