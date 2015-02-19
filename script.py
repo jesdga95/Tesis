@@ -22,13 +22,16 @@ port = 3033
 # client ip
 client_ip = None
 
-# blob sizes
+# blob data
 MAX_SIZE = 3600
 MIN_SIZE = 20
+reference_blob = None
 
 # camera control
 CAMERA_ANGLE = 90;
 POSITION_TOLERANCE = 5;
+camera_position = 0
+scanning = False
 
 # control constants
 ORIGIN_THETA = 59.15
@@ -72,7 +75,7 @@ def get_led_command_left(red, green):
 def get_led_command_right(red, green):
     return "echo " + red + " > /sys/class/leds/ev3\:red\:right/brightness; echo " + green + " > /sys/class/leds/ev3\:green\:right/brightness"
 
-# camera utils
+# movement utils
 def get_camera_position():
     stdin, stdout, sterr = ssh.exec_command("cat /sys/class/tacho-motor/tacho-motor0/position")
     return int(stdout.read().strip())
@@ -84,7 +87,9 @@ def reset_camera_position():
         ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position; echo " + camera_rotation + " > /sys/class/tacho-motor/tacho-motor0/position_sp; echo 1 > /sys/class/tacho-motor/tacho-motor0/run")
         time.sleep(0.5)
         ssh.exec_command("echo 0 > /sys/class/tacho-motor/tacho-motor0/position")
-        
+        global camera_position
+        camera_position = 0
+
 def move_camera(step):
     value = get_camera_position() + step
     if value <= CAMERA_ANGLE and value >= -CAMERA_ANGLE:
@@ -97,6 +102,8 @@ def get_motor_speed(motor): # in rad/s
     direction = 1
     if int(speed_percent) < 0:
         speed_percent = str(-int(speed_percent))
+    #speed = int(speed_percent) * 15.28 / 100
+    #print speed
     speed = {'0': 0,
         '10': 1.88,
         '20': 3.67,
@@ -114,7 +121,29 @@ def transform_speed(speed): # to percent
     percent = speed * 100 / 15.28 # we asume linear behavior for the motor
     if percent > 100:
         percent = 100
+    elif percent < -100:
+        percent = -100
     return round(percent)
+
+def move_forward(speed):
+    ssh.exec_command(get_duty_command(str(-speed), "1") + ";" + get_duty_command(str(-speed), "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
+                        
+def move_backwards(speed):
+    ssh.exec_command(get_duty_command(str(speed), "1") + ";" + get_duty_command(str(speed), "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
+    
+def move_right(speed):
+    ssh.exec_command(get_duty_command(str(-speed), "1") + ";" + get_duty_command(str(speed), "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
+    
+def move_left(speed):
+    ssh.exec_command(get_duty_command(str(speed), "1") + ";" + get_duty_command(str(-speed), "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
+    
+def stop_motors():
+    ssh.exec_command(get_duty_command("0", "0") + ";" + get_duty_command("0", "1") + ";" + get_duty_command("0", "2")  + ";" + get_status_command("0", "0") + ";" + get_status_command("0", "1") + ";" + get_status_command("0", "2"))
+
+def rotate_left():
+    move_left(60)
+    time.sleep(0.5)
+    stop_motors()
 
 ##
 # image processing utils
@@ -188,39 +217,34 @@ def get_ks():
 def find_matching_blob(image):
     red_distance = image.colorDistance(Color.RED).invert() / 16
     blobs = red_distance.findBlobs()
-    squares = blobs.filter([b.isSquare(0.2, 0.2) for b in blobs])
     matching_blob = None
-    if squares:
-        for square in squares:
-            area = square.area()
-            if area <= MAX_SIZE and area >= MIN_SIZE:
-                matching_blob = square
-                # draw red circles on the corners
-                redcircle = DrawingLayer((red_distance.width, red_distance.height))
-                redcircle.circle(square.bottomLeftCorner(), 5, color = Color.RED)
-                redcircle.circle(square.bottomRightCorner(), 5, color = Color.RED)
-                redcircle.circle(square.topLeftCorner(), 5, color = Color.RED)
-                redcircle.circle(square.topRightCorner(), 5, color = Color.RED)
-                red_distance.addDrawingLayer(redcircle)
-                red_distance.applyLayers()
-                red_distance.show()
-                break
+    if blobs:
+        squares = blobs.filter([b.isSquare(0.2, 0.2) for b in blobs])
+        if squares:
+            for square in squares:
+                area = square.area()
+                if area <= MAX_SIZE and area >= MIN_SIZE:
+                    matching_blob = square
+                    break
     return matching_blob
 
 # process current image
 def process_image(file):
-    if True:
-    #try:
+    try:
         # current camera image
         current = Image(file)
-    
-        # reference image
-        reference = Image('/home/pi/reference.jpg')
-        
         blob1 = find_matching_blob(current)
-        blob2 = find_matching_blob(reference)
-    
+
+        # reference image
+        global reference_blob
+        if reference_blob is None:
+            reference = Image('/home/pi/reference.jpg')
+            reference_blob = find_matching_blob(reference)
+        
+        blob2 = reference_blob
+
         # run algorithm
+        global camera_position
         if blob1 is not None and blob2 is not None:
             ls_sas = get_ls(blob2) + get_ls(blob1)
             lpl = 0.5 * linalg.pinv(ls_sas)
@@ -230,10 +254,6 @@ def process_image(file):
             global q_point
             q_point = numpy.dot(linalg.pinv(numpy.dot(numpy.dot(lpl, ls_sas), j)), e_point)
             w_motors = numpy.dot(linalg.pinv(array([r/2, r/2, r/l, -r/l]).reshape(2, 2)), array([q_point[0], q_point[1]]).reshape(2, 1))
-            print w_motors[0]
-            print w_motors[1]
-            print transform_speed(w_motors[0])
-            print transform_speed(w_motors[1])
             if client_ip is not None:
                 try:
                     s_send = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -241,11 +261,44 @@ def process_image(file):
                     s_send.send(str(w_motors[0])+";"+str(w_motors[1])+";"+str(w_pl))
                 except socket.error:
                     pass
-            #ssh.exec_command(get_duty_command(str(transform_speed(w_motors[0])), "1") + ";" + get_duty_command(str(transform_speed(w_motors[1])), "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
-            #if abs(blob2.bottomLeftCorner()[0] - blob1.bottomLeftCorner()[0]) >= 5 and abs(blob2.bottomRightCorner()[0] - blob1.bottomRightCorner()[0]) >= 5 and abs(blob2.topRightCorner()[0] - blob1.topRightCorner()[0]) >= 5 and abs(blob2.topLeftCorner()[0] - blob1.topLeftCorner()[0]) >= 5:
-                #run_forward()
-    #except:
-        #pass
+            left_difference = blob2.bottomLeftCorner()[0] - blob1.bottomLeftCorner()[0]
+            right_difference = blob2.bottomRightCorner()[0] - blob1.bottomRightCorner()[0]
+            if left_difference <= -40 and right_difference <= -40:
+                move_right(20)
+                time.sleep(0.2)
+                stop_motors()
+                reset_camera_position()
+                time.sleep(0.5)
+            elif left_difference >= 40 and right_difference >= 40:
+                move_left(20)
+                time.sleep(0.2)
+                stop_motors()
+                reset_camera_position()
+                time.sleep(0.5)
+            elif camera_position == 0:
+                ssh.exec_command(get_duty_command(str(transform_speed(w_motors[1])), "1") + ";" + get_duty_command(str(transform_speed(w_motors[1])), "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))                
+                reset_camera_position()
+            else:
+                rotate_left()
+        else:
+            global scanning
+            total_degrees = 80 - get_camera_position()
+            if camera_position != 80 and not scanning:
+                move_camera(total_degrees)
+                camera_position = 80
+                scanning = True
+            else:
+                camera_position -= 20
+                move_camera(-20)
+                if camera_position <= -80:
+                    rotate_left()
+                    scanning = False
+            stop_motors()
+            time.sleep(0.5)
+                
+                
+    except:
+        pass
 
 class ProcessingThread(Thread):
     def __init__(self):
@@ -301,19 +354,22 @@ def process_socket_input(value):
             print "Manual mode enabled."
         else:
             if t1.is_manual():
+                global camera_position
                 if value == "MS":
-                    ssh.exec_command(get_duty_command("0", "0") + ";" + get_duty_command("0", "1") + ";" + get_duty_command("0", "2")  + ";" + get_status_command("0", "0") + ";" + get_status_command("0", "1") + ";" + get_status_command("0", "2"))
+                    stop_motors()
                 elif value == "MF":
-                    ssh.exec_command(get_duty_command("-70", "1") + ";" + get_duty_command("-70", "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
+                    move_forward(70)
                 elif value == "MB":
-                    ssh.exec_command(get_duty_command("70", "1") + ";" + get_duty_command("70", "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
+                    move_backwards(70)
                 elif value == "MR":
-                    ssh.exec_command(get_duty_command("-70", "1") + ";" + get_duty_command("70", "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
+                    move_right(70)
                 elif value == "ML":
-                    ssh.exec_command(get_duty_command("70", "1") + ";" + get_duty_command("-70", "2") + ";" + get_status_command("1", "1") + ";" + get_status_command("1", "2"))
+                    move_left(70)
                 elif value == "MCR":
+                    camera_position += 20
                     move_camera(20)
                 elif value == "MCL":
+                    camera_position -= 20
                     move_camera(-20)
             else:
                 print "Manual mode needs to be enabled to perform this action: " + value
@@ -365,15 +421,6 @@ t2.start()
 ##
 
 def cleanup():
-    # turn motors off
-    ssh.exec_command(get_duty_command("0", "0") + ";" + get_duty_command("0", "1") + ";" + get_duty_command("0", "2")  + ";" + get_status_command("0", "0") + ";" + get_status_command("0", "1") + ";" + get_status_command("0", "2"))
-
-    # both leds red
-    ssh.exec_command(get_led_command_left("255", "0") + ";" + get_led_command_right("255", "0"))
-
-    # reset camera position
-    reset_camera_position()
-
     # stop image processing thread
     print "Stopping image processing thread."
     t1.stop()
@@ -383,6 +430,15 @@ def cleanup():
     print "Stopping socket thread."
     t2.stop()
     t2.join()
+    
+    # turn motors off
+    stop_motors()
+
+    # both leds red
+    ssh.exec_command(get_led_command_left("255", "0") + ";" + get_led_command_right("255", "0"))
+
+    # reset camera position
+    reset_camera_position()
 
 ##
 # initialization
